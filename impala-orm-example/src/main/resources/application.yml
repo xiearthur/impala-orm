@@ -1,0 +1,47 @@
+impala:
+  # 基础连接配置
+  host: cdpworker1.phoenixesinfo.com
+  port: 21050
+  database: default
+  driver-class-name: com.cloudera.impala.jdbc41.Driver
+
+  # Kerberos认证配置
+  kerberos:
+    enabled: true
+    principal: hive@PHOENIXESINFO.COM
+    keytab-path: /root/hive.keytab
+    krb5-conf-path: /etc/krb5.conf
+    ticket-renewal-interval: 43200000  # 12小时
+
+  # 连接池配置
+  pool:
+    # 基本连接数配置
+    initial-size: 5
+    min-idle: 5
+    max-active: 20
+    max-wait: 30000
+
+    # 连接检测配置
+    validation-query: SELECT 1
+    validation-query-timeout: 5
+    test-while-idle: true
+    test-on-borrow: false
+    test-on-return: false
+
+    # 空闲连接回收配置
+    time-between-eviction-runs-millis: 60000
+    min-evictable-idle-time-millis: 300000
+
+    # 连接池监控配置
+    filters: stat,wall
+
+    # 其他高级配置
+    query-timeout: 300
+    keep-alive: true
+
+# 日志配置
+logging:
+  level:
+    root: INFO
+    com.example.impala: DEBUG
+    org.apache.hadoop.security: DEBUG

@@ -1,0 +1,6 @@
+impala:
+  host: localhost
+  port: 21050
+  database: test
+  kerberos:
+    enabled: false

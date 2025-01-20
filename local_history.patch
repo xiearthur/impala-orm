@@ -1,0 +1,342 @@
+Index: impala-orm-core/src/main/java/com/example/impala/core/datasource/ImpalaDataSource.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/impala-orm-core/src/main/java/com/example/impala/core/datasource/ImpalaDataSource.java b/impala-orm-core/src/main/java/com/example/impala/core/datasource/ImpalaDataSource.java
+--- a/impala-orm-core/src/main/java/com/example/impala/core/datasource/ImpalaDataSource.java	(date 1736735783666)
++++ b/impala-orm-core/src/main/java/com/example/impala/core/datasource/ImpalaDataSource.java	(date 1736735783666)
+@@ -14,6 +14,7 @@
+ import java.security.PrivilegedExceptionAction;
+ import java.sql.SQLException;
+ import java.sql.Statement;
++import java.util.Map;
+ import java.util.Properties;
+ 
+ public class ImpalaDataSource extends DruidDataSource {
+@@ -25,129 +26,20 @@
+     private UserGroupInformation ugi;
+     private final PoolManager poolManager;
+ 
+-    @Override
+-    public DruidPooledConnection getConnection(final long maxWaitMillis) throws SQLException {
+-        if (!initialized) {
+-            init();
+-        }
+-
+-        DruidPooledConnection conn = null;
+-        try {
+-            if (!kerberosConfig.isEnabled()) {
+-                conn = superGetConnection(maxWaitMillis);
+-            } else {
+-                conn = ugi.doAs((PrivilegedExceptionAction<DruidPooledConnection>) () ->
+-                        superGetConnection(maxWaitMillis));
+-            }
+-
+-            // 验证连接
+-            if (conn != null && !poolManager.validateConnection(conn)) {
+-                closeConnection(conn);
+-                throw new SQLException("Invalid connection obtained from pool");
+-            }
+-
+-            return conn;
+-        } catch (Exception e) {
+-            closeConnection(conn);
+-            throw new SQLException("Failed to get connection: " + e.getMessage(), e);
+-        }
+-    }
+-
+-    private void closeConnection(DruidPooledConnection conn) {
+-        if (conn != null) {
+-            try {
+-                conn.close();
+-            } catch (SQLException e) {
+-                log.warn("Error closing invalid connection", e);
+-            }
+-        }
+-    }
+-
+-    public void close() {
+-        try {
+-            // 先关闭监控
+-            poolManager.stopMonitoring();
+-            super.close();
+-        } catch (Exception e) {
+-            log.error("Error closing datasource", e);
+-        }
+-    }
+-
+-    public Map<String, Object> getPoolStats() {
+-        return poolManager.getPoolStats();
+-    }
+-
+-
+-    @Override
+-    public void init() throws SQLException {
+-        if (initialized) {
+-            return;
+-        }
+-
+-        synchronized (this) {
+-            if (initialized) {
+-                return;
+-            }
+-
+-            try {
+-                validateConfigs();
+-                setupBasicProperties();
+-                setupPoolProperties();
+-
+-                if (kerberosConfig.isEnabled()) {
+-                    setupKerberosAuthentication();
+-                }
+-
+-                super.init();
+-
+-                // 启动连接池监控
+-                poolManager.startMonitoring("impala-pool", 60); // 每60秒监控一次
+-                // 预热连接池
+-                poolManager.warmUpPool(getInitialSize());
+-
+-                initialized = true;
+-                log.info("ImpalaDataSource initialized successfully");
+-
+-            } catch (Exception e) {
+-                log.error("Failed to initialize ImpalaDataSource", e);
+-                throw new SQLException("DataSource initialization failed", e);
+-            }
+-        }
+-    }
+-
+     public ImpalaDataSource(ImpalaConnectionConfig connectionConfig,
+                             ImpalaKerberosConfig kerberosConfig) {
+         this.connectionConfig = connectionConfig;
+         this.kerberosConfig = kerberosConfig;
+-        this.poolManager = new PoolManager();  // 初始化 PoolManager
+-    }
+-
+-    private void validateConfigs() throws ImpalaException {
+-        connectionConfig.validate();
+-        if (kerberosConfig.isEnabled()) {
+-            kerberosConfig.validate();
+-        }
+-    }
+-    public boolean validateConnection(DruidPooledConnection conn) {
+-        try {
+-            try (Statement stmt = conn.createStatement()) {
+-                stmt.setQueryTimeout(3);  // 设置超时时间
+-                stmt.executeQuery("SELECT 1");
+-                return true;
+-            }
+-        } catch (SQLException e) {
+-            log.warn("Connection validation failed", e);
+-            return false;
+-        }
+-    }
++        this.poolManager = new PoolManager();
+ 
+-
+-
+-    private void setupBasicProperties() {
+-        // 设置驱动
++        // 初始化基本配置
+         this.setDriverClassName("com.cloudera.impala.jdbc41.Driver");
++        this.setUrl(buildInitialJdbcUrl());  // 设置初始URL
++        setupPoolProperties();  // 设置连接池属性
++        setupConnectionProperties();  // 设置连接属性
++    }
+ 
+-        // 构建基本JDBC URL
++    private String buildInitialJdbcUrl() {
+         StringBuilder urlBuilder = new StringBuilder();
+         urlBuilder.append("jdbc:impala://")
+                 .append(connectionConfig.getHost())
+@@ -156,9 +48,20 @@
+                 .append("/")
+                 .append(connectionConfig.getDatabase());
+ 
+-        this.setUrl(urlBuilder.toString());
++        // 如果启用了 Kerberos，添加认证参数
++        if (kerberosConfig.isEnabled()) {
++            urlBuilder.append(";AuthMech=1")
++                    .append(";KrbRealm=").append(getKerberosRealm(kerberosConfig.getPrincipal()))
++                    .append(";KrbHostFQDN=").append(connectionConfig.getHost())
++                    .append(";KrbServiceName=impala")
++                    .append(";SSL=0")
++                    .append(";UseNativeQuery=1");
++        }
+ 
+-        // 设置基本连接属性
++        return urlBuilder.toString();
++    }
++
++    private void setupConnectionProperties() {
+         Properties props = new Properties();
+         if (connectionConfig.getQueryTimeout() > 0) {
+             props.setProperty("queryTimeout", String.valueOf(connectionConfig.getQueryTimeout()));
+@@ -166,41 +69,98 @@
+         this.setConnectProperties(props);
+     }
+ 
+-    private String getKerberosRealm(String principal) {
+-        String[] parts = principal.split("@");
+-        return parts.length > 1 ? parts[1] : "";
+-    }
+-
+     private void setupPoolProperties() {
+-        // 设置连接池属性
+         this.setInitialSize(connectionConfig.getInitialSize());
+         this.setMinIdle(connectionConfig.getMinIdle());
+         this.setMaxActive(connectionConfig.getMaxActive());
+         this.setMaxWait(connectionConfig.getMaxWait());
+-
+-        // 设置连接池维护属性
+         this.setTestWhileIdle(connectionConfig.isTestWhileIdle());
+         this.setTestOnBorrow(connectionConfig.isTestOnBorrow());
+         this.setTestOnReturn(connectionConfig.isTestOnReturn());
+         this.setTimeBetweenEvictionRunsMillis(
+                 connectionConfig.getTimeBetweenEvictionRunsMillis());
+-
+-        // 设置验证查询
+         this.setValidationQuery("SELECT 1");
+     }
+ 
++    @Override
++    public void init() throws SQLException {
++        if (initialized) {
++            return;
++        }
++
++        synchronized (this) {
++            if (initialized) {
++                return;
++            }
++
++            try {
++                validateConfigs();
++
++                if (kerberosConfig.isEnabled()) {
++                    setupKerberosAuthentication();
++                }
++
++                super.init();
++
++                // 启动连接池监控
++                poolManager.startMonitoring("impala-pool", 60);
++                // 预热连接池
++                poolManager.warmUpPool(getInitialSize());
++
++                initialized = true;
++                log.info("ImpalaDataSource initialized successfully");
++
++            } catch (Exception e) {
++                log.error("Failed to initialize ImpalaDataSource", e);
++                throw new SQLException("DataSource initialization failed", e);
++            }
++        }
++    }
++
++    @Override
++    public DruidPooledConnection getConnection(final long maxWaitMillis) throws SQLException {
++        if (!initialized) {
++            init();
++        }
++
++        DruidPooledConnection conn = null;
++        try {
++            if (!kerberosConfig.isEnabled()) {
++                conn = super.getConnection(maxWaitMillis);
++            } else {
++                conn = ugi.doAs((PrivilegedExceptionAction<DruidPooledConnection>) () ->
++                        super.getConnection(maxWaitMillis));
++            }
++
++            // 验证连接
++            if (conn != null && !poolManager.validateConnection(conn)) {
++                closeConnection(conn);
++                throw new SQLException("Invalid connection obtained from pool");
++            }
++
++            return conn;
++        } catch (Exception e) {
++            closeConnection(conn);
++            throw new SQLException("Failed to get connection: " + e.getMessage(), e);
++        }
++    }
++
++    private void validateConfigs() throws ImpalaException {
++        connectionConfig.validate();
++        if (kerberosConfig.isEnabled()) {
++            kerberosConfig.validate();
++        }
++    }
++
+     private void setupKerberosAuthentication() throws ImpalaException {
+         try {
+-            // 设置 Kerberos 配置
+             System.setProperty("java.security.krb5.conf", kerberosConfig.getKrb5ConfPath());
+             System.setProperty("javax.security.auth.useSubjectCredsOnly", "false");
+ 
+-            // 设置 Hadoop 配置
+             Configuration conf = new Configuration();
+             conf.set("hadoop.security.authentication", "Kerberos");
+             UserGroupInformation.setConfiguration(conf);
+ 
+-            // 登录
+             ugi = UserGroupInformation.loginUserFromKeytabAndReturnUGI(
+                     kerberosConfig.getPrincipal(),
+                     kerberosConfig.getKeytabPath()
+@@ -210,19 +170,6 @@
+                 throw new ImpalaException("Failed to obtain Kerberos credentials");
+             }
+ 
+-            // 设置 JDBC 连接认证参数
+-            String currentUrl = getUrl();
+-            StringBuilder urlBuilder = new StringBuilder(currentUrl);
+-            urlBuilder.append(";AuthMech=1")
+-                    .append(";KrbRealm=PHOENIXESINFO.COM")
+-                    .append(";KrbHostFQDN=cdpworker1.phoenixesinfo.com")
+-                    .append(";KrbServiceName=impala")
+-                    .append(";SSL=0")
+-                    .append(";UseNativeQuery=1");
+-
+-            setUrl(urlBuilder.toString());
+-
+-            // 日志输出
+             log.info("Kerberos authentication configured successfully");
+             log.info("Principal: {}", kerberosConfig.getPrincipal());
+             log.info("Keytab: {}", kerberosConfig.getKeytabPath());
+@@ -238,5 +185,32 @@
+         }
+     }
+ 
++    private String getKerberosRealm(String principal) {
++        String[] parts = principal.split("@");
++        return parts.length > 1 ? parts[1] : "";
++    }
++
++    private void closeConnection(DruidPooledConnection conn) {
++        if (conn != null) {
++            try {
++                conn.close();
++            } catch (SQLException e) {
++                log.warn("Error closing invalid connection", e);
++            }
++        }
++    }
+ 
++    @Override
++    public void close() {
++        try {
++            poolManager.stopMonitoring();
++            super.close();
++        } catch (Exception e) {
++            log.error("Error closing datasource", e);
++        }
++    }
++
++    public Map<String, Object> getPoolStats() {
++        return poolManager.getPoolStats();
++    }
+ }
+\ No newline at end of file
